@@ -312,6 +312,12 @@ int main(int argc, char **argv) {
 
                 cout << "P" << myRank << ": ";
 
+//                for(int i = 0; i < (worldSize - 1) * processWidth + rootHeight * processWidth; i++) {
+//                    if(i % processWidth == 0) cout << " | ";
+//                    cout << tbuffer[i] << " ";
+//                }
+
+
                 int k = 0;
                 for(int i = 0; i < rootHeight; i++) {
                     for(float el: map[i]) {
@@ -319,17 +325,20 @@ int main(int argc, char **argv) {
                         k++;
                     }
                 }
+
                 const int delta(rootHeight - processHeight);
-                const int end(worldSize * processWidth * processHeight);
+                cout << endl;
+
                 for(int proc = 1; proc < worldSize; proc++) {
-                    int begin(proc * processWidth * processHeight);
-
-
+                    const int begin(proc * processWidth * processHeight);
+                    const int end((proc + 1) * processWidth * processHeight);
+                    cout << "Proc:" << proc << " ";
                     for(int i = begin; i < end; i++) {
-                        //if(i % processWidth == 0) cout << " | ";
-                        //cout << tbuffer[i] << " ";
-                        temp[i + delta] = tbuffer[i];
+                        if(i % processWidth == 0) cout << " | ";
+                        cout << tbuffer[i] << " ";
+                        temp[i + delta * processWidth] = tbuffer[i];
                     }
+                    cout << endl;
                 }
                 cout << endl;
 
@@ -423,16 +432,16 @@ int main(int argc, char **argv) {
             if(ibuffer[0] == 1) {
                 float *mapMessage(new float [processWidth * processHeight]);
                 k = 0;
-                cout << "P" << myRank << ": ";
+//                cout << "P" << myRank << ": ";
                 for(int i = 0; i < processHeight; i++) {
                     for(int j = 0; j < processWidth; j++) {
-                        cout << map[i][j] << " ";
+//                        cout << map[i][j] << " ";
                         mapMessage[k] = map[i][j];
                         k++;
                     }
-                    cout << " | ";
+//                    cout << " | ";
                 }
-                cout << endl << "Size " << processWidth * processHeight << endl;
+//                cout << endl << "Size " << processWidth * processHeight << endl;
                 MPI_Gather(mapMessage, processWidth * processHeight, MPI_FLOAT, nullptr, 0, MPI_FLOAT, ROOT, MPI_COMM_WORLD);
 
                 delete[] mapMessage;
@@ -523,16 +532,16 @@ int main(int argc, char **argv) {
             if(ibuffer[0] == 1) {
                 float *mapMessage(new float [processWidth * processHeight]);
                 k = 0;
-                cout << "P" << myRank << ": ";
+//                cout << "P" << myRank << ": ";
                 for(int i = 0; i < processHeight; i++) {
                     for(int j = 0; j < processWidth; j++) {
-                        cout << map[i][j] << " ";
+//                        cout << map[i][j] << " ";
                         mapMessage[k] = map[i][j];
                         k++;
                     }
-                    cout << " | ";
+//                    cout << " | ";
                 }
-                cout << endl << "Size " << processWidth * processHeight << endl;
+//                cout << endl << "Size " << processWidth * processHeight << endl;
                 MPI_Gather(mapMessage, processWidth * processHeight, MPI_FLOAT, nullptr, 0, MPI_FLOAT, ROOT, MPI_COMM_WORLD);
 
                 delete[] mapMessage;
@@ -551,20 +560,19 @@ int main(int argc, char **argv) {
     //-----------------------\\
 
     double totalDuration = duration_cast<duration<double>>(high_resolution_clock::now() - start).count();
-    cout << " computational time: " << totalDuration << " s" << endl;
+//    cout << " computational time: " << totalDuration << " s" << endl;
 
     if (myRank == 0) {
         string outputFileName(argv[2]);
         writeOutput(myRank, width, height, outputFileName, temperatures);
-   //     cout << "Finalize p:" << myRank << endl;
+        //     cout << "Finalize p:" << myRank << endl;
         MPI_Finalize();
 
     }
     else {
-     //   cout << "Finalize p:" << myRank << endl;
+        //   cout << "Finalize p:" << myRank << endl;
         MPI_Finalize();
     }
 
     return 0;
 }
-
