@@ -155,12 +155,185 @@ double heatDifusionImage(const vector<vector<float>> &oldMap, vector<vector<floa
 
 
 void printHeatImage(const vector<vector<double>> &map) {
-    for (auto row : map) {
+    for (const auto& row : map) {
         for (auto el : row) {
             cout << setw(4) << (int)max(min((float)el, 255.0f), 0.0f) << " ";
         }
         cout << endl;
     }
+}
+
+float rootImage(const vector<vector<float>> &oldMap, vector<vector<float>> &newMap, const vector<vector<bool>> &heatSource, const vector<float> &lowerRow, const int heightLimit) {
+    const int height(heightLimit);
+    const int width(oldMap[0].size());
+
+    float diff, maxDiff(0);
+
+    if(!heatSource[0][0]) {
+        newMap[0][0] = (oldMap[0][0] + oldMap[0][1] + oldMap[1][0] + oldMap[1][1]) / 4;
+
+        diff = abs(newMap[0][0] - oldMap[0][0]);
+
+        maxDiff = diff > maxDiff ? diff : maxDiff;
+    }
+
+    for (int j = 1; j < width - 1; j++) {
+        if(!heatSource[0][j]) {
+            newMap[0][j] = (oldMap[0][j] + oldMap[0][j - 1] + oldMap[1][j - 1] + oldMap[1][j] + oldMap[1][j + 1] + oldMap[0][j + 1]) / 6;
+
+            diff = abs(newMap[0][j] - oldMap[0][j]);
+
+            maxDiff = diff > maxDiff ? diff : maxDiff;
+        }
+    }
+
+    if(!heatSource[0][width - 1]) {
+        newMap[0][width - 1] = (oldMap[0][width - 1] + oldMap[0][width - 2] + oldMap[1][width - 2] + oldMap[1][width - 1]) / 4;
+
+        diff = abs(newMap[0][width - 1] - oldMap[0][width - 1]);
+
+        maxDiff = diff > maxDiff ? diff : maxDiff;
+    }
+
+    for (int i = 1; i < height - 1; i++) {
+        for (int j = 0; j < width; j++) {
+            if (j == 0 && !heatSource[i][j]) {
+                newMap[i][j] = (oldMap[i][j] + oldMap[i - 1][j] + oldMap[i - 1][j + 1] + oldMap[i][j + 1] + oldMap[i + 1][j + 1] + oldMap[i + 1][j]) / 6;
+
+                diff = abs(newMap[i][j] - oldMap[i][j]);
+
+                maxDiff = diff > maxDiff ? diff : maxDiff;
+            }
+            else if (j == width - 1 && !heatSource[i][j]){
+                newMap[i][j] = (oldMap[i][j] + oldMap[i - 1][j] + oldMap[i - 1][j - 1] + oldMap[i][j - 1] + oldMap[i + 1][j - 1] + oldMap[i + 1][j]) / 6;
+
+                diff = abs(newMap[i][j] - oldMap[i][j]);
+
+                maxDiff = diff > maxDiff ? diff : maxDiff;
+            }
+            else if(!heatSource[i][j]) {
+                newMap[i][j] = (oldMap[i][j] + oldMap[i - 1][j - 1] + oldMap[i - 1][j] + oldMap[i - 1][j + 1] + oldMap[i][j + 1] + oldMap[i + 1][j + 1] + oldMap[i + 1][j] + oldMap[i + 1][j - 1] + oldMap[i][j - 1]) / 9;
+
+                diff = abs(newMap[i][j] - oldMap[i][j]);
+
+                maxDiff = diff > maxDiff ? diff : maxDiff;
+            }
+        }
+    }
+
+    if(!heatSource[height - 1][0]) {
+        newMap[height - 1][0] = (oldMap[height - 1][0] + oldMap[height - 2][0] + oldMap[height - 2][1] + oldMap[height - 1][1] + lowerRow[0] + lowerRow[1]) / 6;
+
+        diff = abs(newMap[height - 1][0] - oldMap[height - 1][0]);
+
+        maxDiff = diff > maxDiff ? diff : maxDiff;
+    }
+    for (int j = 1; j < width - 1; j++) {
+        if(!heatSource[height - 1][j]) {
+            newMap[height - 1][j] = (oldMap[height - 1][j] + oldMap[height - 1][j - 1] + oldMap[height - 2][j - 1] + oldMap[height - 2][j] + oldMap[height - 2][j + 1] + oldMap[height - 1][j + 1] + lowerRow[j - 1] + lowerRow[j] + lowerRow[j + 1]) / 9;
+
+            diff = abs(newMap[height - 1][j] - oldMap[height - 1][j]);
+
+            maxDiff = diff > maxDiff ? diff : maxDiff;
+        }
+    }
+
+    if(!heatSource[height - 1][width - 1]) {
+        newMap[height - 1][width - 1] = (oldMap[height - 1][width - 1] + oldMap[height - 1][width - 2] + oldMap[height - 2][width - 2] + oldMap[height - 2][width - 1] + lowerRow[width - 2] + lowerRow[width - 1]) / 6;
+
+        diff = abs(newMap[height - 1][width - 1] - oldMap[height - 1][width - 1]);
+
+        maxDiff = diff > maxDiff ? diff : maxDiff;
+    }
+
+    return maxDiff;
+}
+
+float lastProcImage(const vector<vector<float>> &oldMap, vector<vector<float>> &newMap, const vector<vector<bool>> &heatSource, const vector<float> &upperRow) {
+    const int height(oldMap.size());
+    const int width(oldMap[0].size());
+
+    float diff, maxDiff(0);
+
+    if(!heatSource[0][0]) {
+        newMap[0][0] = (oldMap[0][0] + oldMap[0][1] + oldMap[1][0] + oldMap[1][1] + upperRow[0] + upperRow[1]) / 6;
+
+        diff = abs(newMap[0][0] - oldMap[0][0]);
+
+        maxDiff = diff > maxDiff ? diff : maxDiff;
+    }
+
+    for (int j = 1; j < width - 1; j++) {
+        if(!heatSource[0][j]) {
+            newMap[0][j] = (oldMap[0][j] + oldMap[0][j - 1] + oldMap[1][j - 1] + oldMap[1][j] + oldMap[1][j + 1] + oldMap[0][j + 1]+ upperRow[j - 1] + upperRow[j] + upperRow[j + 1]) / 9;
+
+            diff = abs(newMap[0][j] - oldMap[0][j]);
+
+            maxDiff = diff > maxDiff ? diff : maxDiff;
+        }
+    }
+
+    if(!heatSource[0][width - 1]) {
+        newMap[0][width - 1] = (oldMap[0][width - 1] + oldMap[0][width - 2] + oldMap[1][width - 2] + oldMap[1][width - 1]+ upperRow[width - 2] + upperRow[width - 1]) / 6;
+
+        diff = abs(newMap[0][width - 1] - oldMap[0][width - 1]);
+
+        maxDiff = diff > maxDiff ? diff : maxDiff;
+    }
+
+    for (int i = 1; i < height - 1; i++) {
+        for (int j = 0; j < width; j++) {
+            if (j == 0 && !heatSource[i][j]) {
+                newMap[i][j] = (oldMap[i][j] + oldMap[i - 1][j] + oldMap[i - 1][j + 1] + oldMap[i][j + 1] + oldMap[i + 1][j + 1] + oldMap[i + 1][j]) / 6;
+
+                diff = abs(newMap[i][j] - oldMap[i][j]);
+
+                maxDiff = diff > maxDiff ? diff : maxDiff;
+            }
+            else if (j == width - 1 && !heatSource[i][j]){
+                newMap[i][j] = (oldMap[i][j] + oldMap[i - 1][j] + oldMap[i - 1][j - 1] + oldMap[i][j - 1] + oldMap[i + 1][j - 1] + oldMap[i + 1][j]) / 6;
+
+                diff = abs(newMap[i][j] - oldMap[i][j]);
+
+                maxDiff = diff > maxDiff ? diff : maxDiff;
+            }
+            else if(!heatSource[i][j]) {
+                newMap[i][j] = (oldMap[i][j] + oldMap[i - 1][j - 1] + oldMap[i - 1][j] + oldMap[i - 1][j + 1] + oldMap[i][j + 1] + oldMap[i + 1][j + 1] + oldMap[i + 1][j] + oldMap[i + 1][j - 1] + oldMap[i][j - 1]) / 9;
+
+                diff = abs(newMap[i][j] - oldMap[i][j]);
+
+                maxDiff = diff > maxDiff ? diff : maxDiff;
+            }
+        }
+    }
+
+    if(!heatSource[height - 1][0]) {
+        newMap[height - 1][0] = (oldMap[height - 1][0] + oldMap[height - 2][0] + oldMap[height - 2][1] + oldMap[height - 1][1]) / 4;
+
+        diff = abs(newMap[height - 1][0] - oldMap[height - 1][0]);
+
+        maxDiff = diff > maxDiff ? diff : maxDiff;
+    }
+    for (int j = 1; j < width - 1; j++) {
+        if(!heatSource[height - 1][j]) {
+            newMap[height - 1][j] = (oldMap[height - 1][j] + oldMap[height - 1][j - 1] + oldMap[height - 2][j - 1] + oldMap[height - 2][j] + oldMap[height - 2][j + 1] + oldMap[height - 1][j + 1]) / 6;
+
+            diff = abs(newMap[height - 1][j] - oldMap[height - 1][j]);
+
+            maxDiff = diff > maxDiff ? diff : maxDiff;
+        }
+    }
+
+    if(!heatSource[height - 1][width - 1]) {
+        newMap[height - 1][width - 1] = (oldMap[height - 1][width - 1] + oldMap[height - 1][width - 2] + oldMap[height - 2][width - 2] + oldMap[height - 2][width - 1]) / 4;
+
+        diff = abs(newMap[height - 1][width - 1] - oldMap[height - 1][width - 1]);
+
+        maxDiff = diff > maxDiff ? diff : maxDiff;
+    }
+    return maxDiff;
+
+    return maxDiff;
 }
 
 int main(int argc, char **argv) {
@@ -211,50 +384,58 @@ int main(int argc, char **argv) {
     constexpr int ROOT = 0;
     vector<float> temp;
 
-    while (true) {
+    vector<vector<float>> map, newMap;
+    vector<vector<bool>> heatSource;
+    bool resize(false);
+
+    int  processHeight, processWidth;
+
+    int it = 0;
+    while (it < 10) {
         if(myRank == ROOT) {//root process
-            const int processHeight(height / worldSize);
-            const int processWidth(width);
+            it++;
+            processHeight = height / worldSize;
+            processWidth = width;
             const int rootHeight(processHeight + height % worldSize);
 
+            if(!resize) {
+                map.resize(height, vector<float>(width, DEFAULT_TEMP));
+                newMap.resize(height, vector<float>(width, DEFAULT_TEMP));
+                heatSource.resize(height, vector<bool>(width, false));
+                resize = true;
 
-            vector<vector<float>> map(height, vector<float>(width, DEFAULT_TEMP));
-            vector<vector<float>> newMap(height, vector<float>(width, DEFAULT_TEMP));
-            vector<vector<bool>> heatSource(height, vector<bool>(width, false));
-
-            for (auto & spot : spots) {
-                map[spot.mX][spot.mY] = spot.mTemperature;
-                heatSource[spot.mX][spot.mY] = true;
-            }
-
-            //bcast problem sizes to each process
-            int dimensions[2] = {processHeight, width};
-            MPI_Bcast(dimensions,2, MPI_INT,ROOT,MPI_COMM_WORLD);
-
-            //prepare matrices for each process
-//        cout << "ph: " << processHeight << endl;
-            for(int proc = 1; proc < worldSize; proc++) {
-                float *mapMessage (new float [width * processHeight]);
-                int *sourceMessage (new int [width * processHeight]);
-                int k = 0;
-                for(int i = rootHeight + (proc - 1) * processHeight; i < rootHeight + proc * processHeight; i++) {
-                    for(int j = 0; j < width; j++) {
-                        mapMessage[k] = map[i][j];
-                        sourceMessage[k] = heatSource[i][j];
-                        k++;
-                    }
+                for (auto & spot : spots) {
+                    map[spot.mX][spot.mY] = spot.mTemperature;
+                    newMap[spot.mX][spot.mY] = spot.mTemperature;
+                    heatSource[spot.mX][spot.mY] = true;
                 }
-//            cout << "P " << proc << ": ";
-//            for(int i = 0; i < width * processHeight; i++) {
-//                cout << sourceMessage[i] << " ";
-//            }
-//            cout << endl;
-                MPI_Send(mapMessage,width * processHeight, MPI_FLOAT,proc,0,MPI_COMM_WORLD);
-                MPI_Send(sourceMessage,width * processHeight, MPI_INT,proc,0,MPI_COMM_WORLD);
-                delete[] mapMessage;
-                delete[] sourceMessage;
+
+                //bcast problem sizes to each process
+                int dimensions[2] = {processHeight, width};
+                MPI_Bcast(dimensions,2, MPI_INT,ROOT,MPI_COMM_WORLD);
+
+                //prepare matrices for each process
+                //cout << "ph: " << processHeight << endl;
+                for(int proc = 1; proc < worldSize; proc++) {
+                    float *mapMessage (new float [width * processHeight]);
+                    int *sourceMessage (new int [width * processHeight]);
+                    int k = 0;
+                    for(int i = rootHeight + (proc - 1) * processHeight; i < rootHeight + proc * processHeight; i++) {
+                        for(int j = 0; j < width; j++) {
+                            mapMessage[k] = map[i][j];
+                            sourceMessage[k] = heatSource[i][j];
+                            k++;
+                        }
+                    }
+                    MPI_Send(mapMessage,width * processHeight, MPI_FLOAT,proc,0,MPI_COMM_WORLD);
+                    MPI_Send(sourceMessage,width * processHeight, MPI_INT,proc,0,MPI_COMM_WORLD);
+                    delete[] mapMessage;
+                    delete[] sourceMessage;
+                }
             }
-            //starting iterations
+
+            //one iteration
+
             //send your neighbor lower info
             float *rowMessage (new float [width]);
             int row(rootHeight - 1);
@@ -272,19 +453,22 @@ int main(int argc, char **argv) {
             float fbuffer[BUFFER_SIZE];
             MPI_Recv(fbuffer,BUFFER_SIZE, MPI_FLOAT,myRank + 1,MPI_ANY_TAG,MPI_COMM_WORLD,&status);
 
-//        cout << "P:" << myRank << " " << "Lower: ";
+            //cout << "P:" << myRank << " " << "Lower: ";
             vector<float> lowerTemp(processWidth, 0);
             for(int i = 0; i < processWidth; i++) {
-//            cout << fbuffer[i] << " ";
+                //cout << fbuffer[i] << " ";
                 lowerTemp[i] = fbuffer[i];
             }
 
-            //todo: computation
+            //computation
+            //float diff = myRank;
+            float diff(rootImage(map, newMap, heatSource, lowerTemp, rootHeight));
+            swap(map, newMap);
 
             // check differences
 
-            cout << endl;
-            float diff(myRank);
+            //cout << endl;
+
             float *differences(new float [worldSize]());
             MPI_Gather(nullptr, 0, MPI_FLOAT, differences, 1, MPI_FLOAT, ROOT, MPI_COMM_WORLD);
 
@@ -310,14 +494,6 @@ int main(int argc, char **argv) {
                 float *tbuffer(new float [worldSize * processWidth * processHeight]());
                 MPI_Gather(nullptr, 0, MPI_FLOAT, tbuffer, processWidth * processHeight, MPI_FLOAT, ROOT, MPI_COMM_WORLD);
 
-                cout << "P" << myRank << ": ";
-
-//                for(int i = 0; i < (worldSize - 1) * processWidth + rootHeight * processWidth; i++) {
-//                    if(i % processWidth == 0) cout << " | ";
-//                    cout << tbuffer[i] << " ";
-//                }
-
-
                 int k = 0;
                 for(int i = 0; i < rootHeight; i++) {
                     for(float el: map[i]) {
@@ -327,20 +503,20 @@ int main(int argc, char **argv) {
                 }
 
                 const int delta(rootHeight - processHeight);
-                cout << endl;
+                //cout << endl;
 
                 for(int proc = 1; proc < worldSize; proc++) {
                     const int begin(proc * processWidth * processHeight);
                     const int end((proc + 1) * processWidth * processHeight);
-                    cout << "Proc:" << proc << " ";
+                    //cout << "Proc:" << proc << " ";
                     for(int i = begin; i < end; i++) {
-                        if(i % processWidth == 0) cout << " | ";
-                        cout << tbuffer[i] << " ";
+                        //if(i % processWidth == 0) cout << " | ";
+                        //cout << tbuffer[i] << " ";
                         temp[i + delta * processWidth] = tbuffer[i];
                     }
-                    cout << endl;
+                    //cout << endl;
                 }
-                cout << endl;
+                //cout << endl;
 
                 for(int i = 0; i < temp.size(); i++) {
                     if(i % processWidth == 0) cout << " | ";
@@ -354,41 +530,50 @@ int main(int argc, char **argv) {
             }
         }
         else if(myRank == worldSize - 1) {//last process rowise
+            it++;
             //get process dimensions form root
             int ibuffer[BUFFER_SIZE];
-
-            MPI_Status status;
-            MPI_Bcast(ibuffer,2, MPI_INT,ROOT,MPI_COMM_WORLD);
-
-            const int  processHeight(ibuffer[0]), processWidth(ibuffer[1]);
-            vector<vector<float>> map(processHeight, vector<float>(processWidth, DEFAULT_TEMP));
-            vector<vector<float>> newMap(processHeight, vector<float>(processWidth, DEFAULT_TEMP));
-            vector<vector<bool>> heatSource(processHeight, vector<bool>(processWidth, false));
-
-            //get process matrix
             float fbuffer[BUFFER_SIZE];
-
-            MPI_Recv(fbuffer,BUFFER_SIZE, MPI_FLOAT,ROOT,MPI_ANY_TAG,MPI_COMM_WORLD,&status);
-
             int receivedSize;
-            MPI_Get_count(&status, MPI_FLOAT, &receivedSize);
+            MPI_Status status;
 
-            MPI_Recv(ibuffer,BUFFER_SIZE, MPI_INT,ROOT,MPI_ANY_TAG,MPI_COMM_WORLD, &status);
+            if(!resize) {
+                MPI_Bcast(ibuffer,2, MPI_INT,ROOT,MPI_COMM_WORLD);
 
-            if(receivedSize != processWidth * processHeight)
-                throw std::logic_error("receivedSize != processWidth * processHeight");
+                processHeight = ibuffer[0];
+                processWidth = ibuffer[1];
 
-//      cout << "P:" << myRank << " " << "Mat: ";
-            int k = 0;
-            for(int i = 0; i < processHeight; i++) {
-                for(int j = 0; j < processWidth; j++) {
-                    //            cout << fbuffer[k] << " ";
-                    map[i][j] = fbuffer[k];
-                    heatSource[i][j] = ibuffer[k];
-                    k++;
+                map.resize(processHeight, vector<float>(processWidth, DEFAULT_TEMP));
+                newMap.resize(processHeight, vector<float>(processWidth, DEFAULT_TEMP));
+                heatSource.resize(processHeight, vector<bool>(processWidth, false));
+                resize = true;
+
+                //get process matrix
+
+
+                MPI_Recv(fbuffer,BUFFER_SIZE, MPI_FLOAT,ROOT,MPI_ANY_TAG,MPI_COMM_WORLD,&status);
+
+                MPI_Get_count(&status, MPI_FLOAT, &receivedSize);
+
+                MPI_Recv(ibuffer,BUFFER_SIZE, MPI_INT,ROOT,MPI_ANY_TAG,MPI_COMM_WORLD, &status);
+
+                if(receivedSize != processWidth * processHeight)
+                    throw std::logic_error("receivedSize != processWidth * processHeight");
+
+                //cout << "P:" << myRank << " " << "Mat: ";
+                int k = 0;
+                for(int i = 0; i < processHeight; i++) {
+                    for(int j = 0; j < processWidth; j++) {
+                        //cout << fbuffer[k] << " ";
+                        map[i][j] = fbuffer[k];
+                        heatSource[i][j] = ibuffer[k];
+                        k++;
+                    }
+                    //cout << " | ";
                 }
-                //          cout << " | ";
             }
+
+            //one iteration
 
             //send info to neighbour above
 
@@ -402,8 +587,6 @@ int main(int argc, char **argv) {
             MPI_Send(rowMessage,processWidth, MPI_FLOAT,myRank - 1,0,MPI_COMM_WORLD);
             delete[] rowMessage;
 
-
-            //starting iterations
             //get info from neighbour above
             MPI_Recv(fbuffer,BUFFER_SIZE, MPI_FLOAT,myRank - 1,MPI_ANY_TAG,MPI_COMM_WORLD,&status);
             MPI_Get_count(&status, MPI_FLOAT, &receivedSize);
@@ -413,17 +596,19 @@ int main(int argc, char **argv) {
 
             vector<float> upperTemp(processWidth, 0);
 
-//        cout << "P:" << myRank << " " << "Upper: ";
+            //cout << "P:" << myRank << " " << "Upper: ";
             for(int i = 0; i < processWidth; i++) {
-//            cout << fbuffer[i] << " ";
+                //cout << fbuffer[i] << " ";
                 upperTemp[i] = fbuffer[i];
             }
 
 
             //todo: computation
+            float diff (lastProcImage(map, newMap, heatSource, upperTemp));
+            swap(map, newMap);
 
             //send max diff
-            float diff = myRank;
+            //float diff = myRank;
             float messageDiff[1] = {diff};
             MPI_Gather(messageDiff, 1, MPI_FLOAT, nullptr, 0, MPI_FLOAT, ROOT, MPI_COMM_WORLD);
 
@@ -431,17 +616,17 @@ int main(int argc, char **argv) {
             MPI_Bcast(ibuffer,1, MPI_INT,ROOT,MPI_COMM_WORLD);
             if(ibuffer[0] == 1) {
                 float *mapMessage(new float [processWidth * processHeight]);
-                k = 0;
-//                cout << "P" << myRank << ": ";
+                int k = 0;
+                //cout << "P" << myRank << ": ";
                 for(int i = 0; i < processHeight; i++) {
                     for(int j = 0; j < processWidth; j++) {
-//                        cout << map[i][j] << " ";
+                        //cout << map[i][j] << " ";
                         mapMessage[k] = map[i][j];
                         k++;
                     }
-//                    cout << " | ";
+                    //cout << " | ";
                 }
-//                cout << endl << "Size " << processWidth * processHeight << endl;
+                //cout << endl << "Size " << processWidth * processHeight << endl;
                 MPI_Gather(mapMessage, processWidth * processHeight, MPI_FLOAT, nullptr, 0, MPI_FLOAT, ROOT, MPI_COMM_WORLD);
 
                 delete[] mapMessage;
@@ -449,41 +634,49 @@ int main(int argc, char **argv) {
             }
         }
         else {
+            it++;
             //get process dimensions form root
             int ibuffer[BUFFER_SIZE];
-
-            MPI_Status status;
-            MPI_Bcast(ibuffer,2, MPI_INT,ROOT,MPI_COMM_WORLD);
-
-            const int processHeight (ibuffer[0]), processWidth(ibuffer[1]);
-            vector<vector<float>> map(processHeight, vector<float>(processWidth, DEFAULT_TEMP));
-            vector<vector<float>> newMap(processHeight, vector<float>(processWidth, DEFAULT_TEMP));
-            vector<vector<bool>> heatSource(processHeight, vector<bool>(processWidth, false));
-
-            //get process matrix
             float fbuffer[BUFFER_SIZE];
-
-            MPI_Recv(fbuffer,BUFFER_SIZE, MPI_FLOAT,ROOT,MPI_ANY_TAG,MPI_COMM_WORLD,&status);
-
             int receivedSize;
-            MPI_Get_count(&status, MPI_FLOAT, &receivedSize);
+            MPI_Status status;
 
-            MPI_Recv(ibuffer,BUFFER_SIZE, MPI_INT,ROOT,MPI_ANY_TAG,MPI_COMM_WORLD, &status);
+            if(!resize) {
+                MPI_Bcast(ibuffer,2, MPI_INT,ROOT,MPI_COMM_WORLD);
 
-            if(receivedSize != processWidth * processHeight)
-                throw std::logic_error("receivedSize != processWidth * processHeight");
+                processHeight = ibuffer[0];
+                processWidth = ibuffer[1];
 
-            int k = 0;
-//        cout << "P:" << myRank << " " << "Mat: ";
-            for(int i = 0; i < processHeight; i++) {
-                for(int j = 0; j < processWidth; j++) {
-//                cout << fbuffer[k] << " ";
-                    map[i][j] = fbuffer[k];
-                    heatSource[i][j] = ibuffer[k];
-                    k++;
+                map.resize(processHeight, vector<float>(processWidth, DEFAULT_TEMP));
+                newMap.resize(processHeight, vector<float>(processWidth, DEFAULT_TEMP));
+                heatSource.resize(processHeight, vector<bool>(processWidth, false));
+                resize = true;
+
+                //get process matrix
+
+                MPI_Recv(fbuffer,BUFFER_SIZE, MPI_FLOAT,ROOT,MPI_ANY_TAG,MPI_COMM_WORLD,&status);
+
+                MPI_Get_count(&status, MPI_FLOAT, &receivedSize);
+
+                MPI_Recv(ibuffer,BUFFER_SIZE, MPI_INT,ROOT,MPI_ANY_TAG,MPI_COMM_WORLD, &status);
+
+                if(receivedSize != processWidth * processHeight)
+                    throw std::logic_error("receivedSize != processWidth * processHeight");
+
+                int k = 0;
+                //cout << "P:" << myRank << " " << "Mat: ";
+                for(int i = 0; i < processHeight; i++) {
+                    for(int j = 0; j < processWidth; j++) {
+                        //cout << fbuffer[k] << " ";
+                        map[i][j] = fbuffer[k];
+                        heatSource[i][j] = ibuffer[k];
+                        k++;
+                    }
+                    //cout << " | ";
                 }
-//            cout << " | ";
             }
+
+            //one iteration
 
             //send info to neighbour above and bellow
 
@@ -504,19 +697,19 @@ int main(int argc, char **argv) {
             MPI_Recv(fbuffer,BUFFER_SIZE, MPI_FLOAT,myRank - 1,MPI_ANY_TAG,MPI_COMM_WORLD,&status);
 
             vector<float> upperTemp(processWidth, 0);
-//        cout << "P:" << myRank << " " << "Upper: ";
+            //cout << "P:" << myRank << " " << "Upper: ";
             for(int i = 0; i < processWidth; i++) {
-                //          cout << fbuffer[i] << " ";
+                //cout << fbuffer[i] << " ";
                 upperTemp[i] = fbuffer[i];
             }
             cout << endl;
 
             MPI_Recv(fbuffer,BUFFER_SIZE, MPI_FLOAT,myRank + 1,MPI_ANY_TAG,MPI_COMM_WORLD,&status);
 
-//        cout << "P:" << myRank << " " << "Lower: ";
+            //cout << "P:" << myRank << " " << "Lower: ";
             vector<float> lowerTemp(processWidth, 0);
             for(int i = 0; i < processWidth; i++) {
-//            cout << fbuffer[i] << " ";
+                //cout << fbuffer[i] << " ";
                 upperTemp[i] = fbuffer[i];
             }
 
@@ -531,17 +724,17 @@ int main(int argc, char **argv) {
             MPI_Bcast(ibuffer,1, MPI_INT,ROOT,MPI_COMM_WORLD);
             if(ibuffer[0] == 1) {
                 float *mapMessage(new float [processWidth * processHeight]);
-                k = 0;
-//                cout << "P" << myRank << ": ";
+                int k = 0;
+                //cout << "P" << myRank << ": ";
                 for(int i = 0; i < processHeight; i++) {
                     for(int j = 0; j < processWidth; j++) {
-//                        cout << map[i][j] << " ";
+                        //cout << map[i][j] << " ";
                         mapMessage[k] = map[i][j];
                         k++;
                     }
-//                    cout << " | ";
+                    //cout << " | ";
                 }
-//                cout << endl << "Size " << processWidth * processHeight << endl;
+                //cout << endl << "Size " << processWidth * processHeight << endl;
                 MPI_Gather(mapMessage, processWidth * processHeight, MPI_FLOAT, nullptr, 0, MPI_FLOAT, ROOT, MPI_COMM_WORLD);
 
                 delete[] mapMessage;
