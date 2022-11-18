@@ -7,17 +7,34 @@
 #include <algorithm>
 #include <tuple>
 #include <iostream>
-#include <iomanip>
 
+#pragma clang diagnostic push
+#pragma ide diagnostic ignored "LocalValueEscapesScope"
 using namespace std;
 using namespace std::chrono;
 
+constexpr double DEFAULT_TEMP = 128;
+constexpr double EPS_DIFF = 1e-5;
+constexpr int ROOT = 0;
+
+int WORLD_SIZE = -1;
+int RANK = -2;
+
+int ROOT_HEIGHT = -3;
+int PROCESS_HEIGHT = -4;
+
+int HEIGHT = -5;
+int WIDTH = -6;
+
+int ITERATION = 0;
 // Spot with permanent temperature on coordinates [x,y].
 struct Spot {
     int mX, mY;
     float mTemperature;
 
-    bool operator==(const Spot &b) const { return (mX == b.mX) && (mY == b.mY); }
+    bool operator==(const Spot &b) const {
+        return (mX == b.mX) && (mY == b.mY);
+    }
 };
 
 tuple<int, int, vector<Spot>> readInstance(string instanceFileName) {
@@ -67,100 +84,345 @@ void printHelpPage(char *program) {
     cout << "\t" << program << " INPUT_PATH OUTPUT_PATH" << endl << endl;
 }
 
-double heatDifusionImage(const vector<vector<float>> &oldMap, vector<vector<float>> &newMap, const vector<vector<bool>> &heatSource)
-{
-    const int height(oldMap.size());
-    const int width(oldMap[0].size());
+//-----------------------------------My functions------------------
 
-    double diff, maxDiff(0);
+//initialization
 
-    if(!heatSource[0][0]) {
-        newMap[0][0] = (oldMap[0][0] + oldMap[0][1] + oldMap[1][0] + oldMap[1][1]) / 4;
+void rootInit(vector<vector<float>> &map, vector<vector<float>> &newMap, vector<vector<bool>> &heatSource, const vector<Spot> &spots) {
+    map.resize(HEIGHT, vector<float>(WIDTH, DEFAULT_TEMP));
+    newMap.resize(HEIGHT, vector<float>(WIDTH, DEFAULT_TEMP));
+    heatSource.resize(HEIGHT, vector<bool>(WIDTH, false));
 
-        diff = abs(newMap[0][0] - oldMap[0][0]);
-
-        maxDiff = diff > maxDiff ? diff : maxDiff;
+    for (const auto &spot : spots) {
+        map[spot.mX][spot.mY] = spot.mTemperature;
+        newMap[spot.mX][spot.mY] = spot.mTemperature;
+        heatSource[spot.mX][spot.mY] = true;
     }
 
-    for (int j = 1; j < width - 1; j++) {
-        if(!heatSource[0][j]) {
-            newMap[0][j] = (oldMap[0][j] + oldMap[0][j - 1] + oldMap[1][j - 1] + oldMap[1][j] + oldMap[1][j + 1] + oldMap[0][j + 1]) / 6;
+    //bcast the problem dimensions to subprocesses
+    int dimensions[2] = {PROCESS_HEIGHT, WIDTH};
+    MPI_Bcast(dimensions, 2, MPI_INT, ROOT, MPI_COMM_WORLD);
 
-            diff = abs(newMap[0][j] - oldMap[0][j]);
+    vector<float> mapBcast(WORLD_SIZE * PROCESS_HEIGHT * WIDTH, 0);
+    vector<int> hsBcast(WORLD_SIZE * PROCESS_HEIGHT * WIDTH, 0);
+
+    int k = PROCESS_HEIGHT * WIDTH;
+    for(int i = ROOT_HEIGHT; i < HEIGHT; i++) {
+        for(int j = 0; j < WIDTH; j++) {
+            mapBcast[k] = map[i][j];
+            hsBcast[k] = heatSource[i][j];
+            k++;
+        }
+    }
+    vector<float> rcv(PROCESS_HEIGHT * WIDTH, 0);
+
+    MPI_Scatter(mapBcast.data(), PROCESS_HEIGHT * WIDTH, MPI_FLOAT, rcv.data(), PROCESS_HEIGHT * WIDTH, MPI_FLOAT, ROOT, MPI_COMM_WORLD);
+    MPI_Scatter(hsBcast.data(), PROCESS_HEIGHT * WIDTH, MPI_INT, rcv.data(), PROCESS_HEIGHT * WIDTH, MPI_INT, ROOT, MPI_COMM_WORLD);
+
+}
+
+void subProcesInit(vector<vector<float>> &map, vector<vector<float>> &newMap, vector<vector<bool>> &heatSource) {
+    vector<int> ibuffer(2);
+    MPI_Bcast(ibuffer.data(),ibuffer.size(), MPI_INT,ROOT,MPI_COMM_WORLD);
+
+    PROCESS_HEIGHT = ibuffer[0];
+    WIDTH = ibuffer[1];
+
+    map.resize(PROCESS_HEIGHT, vector<float>(WIDTH, DEFAULT_TEMP));
+    newMap.resize(PROCESS_HEIGHT, vector<float>(WIDTH, DEFAULT_TEMP));
+    heatSource.resize(PROCESS_HEIGHT, vector<bool>(WIDTH, false));
+
+    vector<float>matrixBuff(WIDTH * PROCESS_HEIGHT, 0);
+    MPI_Scatter(nullptr, 0, MPI_FLOAT, matrixBuff.data(), PROCESS_HEIGHT * WIDTH, MPI_FLOAT, ROOT, MPI_COMM_WORLD);
+
+    vector<int>hsBuff(WIDTH * PROCESS_HEIGHT, 0);
+    MPI_Scatter(nullptr, 0, MPI_INT, hsBuff.data(), WIDTH * PROCESS_HEIGHT, MPI_INT, ROOT, MPI_COMM_WORLD);
+
+    int k = 0;
+    for(int i = 0; i < PROCESS_HEIGHT; i++) {
+        for(int j = 0; j < WIDTH; j++) {
+            map[i][j] = matrixBuff[k];
+            heatSource[i][j] = hsBuff[k];
+            k++;
+        }
+    }
+}
+
+//communications
+//true down, false up
+void sendRow(bool direction, const vector<float> &row) {
+    const int move = direction ? 1 : -1;
+
+    MPI_Send(row.data(),WIDTH, MPI_FLOAT,RANK + move,0,MPI_COMM_WORLD);
+}
+
+void recieveRow(bool direction, vector<float> &row) {
+    int move = direction ? 1 : -1;
+
+    vector<float> fbuffer(WIDTH, 0);
+    int receivedSize;
+    MPI_Status status;
+
+    MPI_Recv(fbuffer.data(),WIDTH, MPI_FLOAT,RANK + move,MPI_ANY_TAG,MPI_COMM_WORLD,&status);
+    MPI_Get_count(&status, MPI_FLOAT, &receivedSize);
+
+    if(receivedSize != WIDTH)
+        throw std::logic_error("receivedSize != processWidth " + to_string(RANK));
+
+    row =  std::move(fbuffer);
+}
+
+//helping functions
+
+void returnFinalMap(const vector<vector<float>> &map) {
+    vector<float> mapMessage(PROCESS_HEIGHT * WIDTH);
+    int k = 0;
+    //cout << "P" << myRank << ": ";
+    for(int i = 0; i < PROCESS_HEIGHT; i++) {
+        for(int j = 0; j < WIDTH; j++) {
+            //cout << map[i][j] << " ";
+            mapMessage[k] = map[i][j];
+            k++;
+        }
+        //cout << " | ";
+    }
+    MPI_Gather(mapMessage.data(), WIDTH * PROCESS_HEIGHT, MPI_FLOAT, nullptr, 0, MPI_FLOAT, ROOT, MPI_COMM_WORLD);
+}
+
+void prepareResult(const vector<vector<float>> &map, vector<float> &temp) {
+    temp.resize(WIDTH * HEIGHT);
+
+    vector<float> tbuffer(WORLD_SIZE * PROCESS_HEIGHT * WIDTH, 0);
+    MPI_Gather(nullptr, 0, MPI_FLOAT, tbuffer.data(), PROCESS_HEIGHT * WIDTH, MPI_FLOAT, ROOT, MPI_COMM_WORLD);
+
+    int k = 0;
+    for(int i = 0; i < ROOT_HEIGHT; i++) {
+        for(float el: map[i]) {
+            temp[k] = el;
+            k++;
+        }
+    }
+
+    const int delta((ROOT_HEIGHT - PROCESS_HEIGHT) * WIDTH);
+
+    for(int proc = 1; proc < WORLD_SIZE; proc++) {
+        const int begin(proc * WIDTH * PROCESS_HEIGHT);
+        const int end((proc + 1) * WIDTH * PROCESS_HEIGHT);
+        //cout << "Proc:" << proc << " ";
+        for(int i = begin; i < end; i++) {
+            //if(i % processWidth == 0) cout << " | ";
+            //cout << tbuffer[i] << " ";
+            temp[i + delta] = tbuffer[i];
+        }
+        //cout << endl;
+    }
+}
+
+float min_of_3(float x, float y, float z) { return x > y ? x > z ? x : z : y > z ? y : z; }
+
+//computation
+
+float topRow(const vector<vector<float>> &oldMap, vector<vector<float>> &newMap, const vector<vector<bool>> &heatSource, const vector<float> &upperRow = vector<float>()) {
+    float diff, maxDiff(0);
+
+    if(upperRow.empty()) {
+        if (!heatSource[0][0]) {
+            newMap[0][0] = (oldMap[0][0] + oldMap[0][1] + oldMap[1][0] + oldMap[1][1]) / 4;
+
+            diff = abs(newMap[0][0] - oldMap[0][0]);
+
+            maxDiff = diff > maxDiff ? diff : maxDiff;
+        }
+
+        for (int j = 1; j < WIDTH - 1; j++) {
+            if (!heatSource[0][j]) {
+                newMap[0][j] = (oldMap[0][j] + oldMap[0][j - 1] + oldMap[1][j - 1] + oldMap[1][j] + oldMap[1][j + 1] +
+                                oldMap[0][j + 1]) / 6;
+
+                diff = abs(newMap[0][j] - oldMap[0][j]);
+
+                maxDiff = diff > maxDiff ? diff : maxDiff;
+            }
+        }
+
+        if (!heatSource[0][WIDTH - 1]) {
+            newMap[0][WIDTH - 1] =
+                    (oldMap[0][WIDTH - 1] + oldMap[0][WIDTH - 2] + oldMap[1][WIDTH - 2] + oldMap[1][WIDTH - 1]) / 4;
+
+            diff = abs(newMap[0][WIDTH - 1] - oldMap[0][WIDTH - 1]);
 
             maxDiff = diff > maxDiff ? diff : maxDiff;
         }
     }
+    else {
+        if(!heatSource[0][0]) {
+            newMap[0][0] = (oldMap[0][0] + oldMap[0][1] + oldMap[1][0] + oldMap[1][1] + upperRow[0] + upperRow[1]) / 6;
 
-    if(!heatSource[0][width - 1]) {
-        newMap[0][width - 1] = (oldMap[0][width - 1] + oldMap[0][width - 2] + oldMap[1][width - 2] + oldMap[1][width - 1]) / 4;
+            diff = abs(newMap[0][0] - oldMap[0][0]);
 
-        diff = abs(newMap[0][width - 1] - oldMap[0][width - 1]);
+            maxDiff = diff > maxDiff ? diff : maxDiff;
+        }
+        else {
+            newMap[0][0] = oldMap[0][0];
+        }
 
-        maxDiff = diff > maxDiff ? diff : maxDiff;
+        for (int j = 1; j < WIDTH - 1; j++) {
+            if(!heatSource[0][j]) {
+                newMap[0][j] = (oldMap[0][j] + oldMap[0][j - 1] + oldMap[1][j - 1] + oldMap[1][j] + oldMap[1][j + 1] + oldMap[0][j + 1]+ upperRow[j - 1] + upperRow[j] + upperRow[j + 1]) / 9;
+
+                diff = abs(newMap[0][j] - oldMap[0][j]);
+
+                maxDiff = diff > maxDiff ? diff : maxDiff;
+            }
+            else {
+                newMap[0][j] = oldMap[0][j];
+            }
+        }
+
+        if(!heatSource[0][WIDTH - 1]) {
+            newMap[0][WIDTH - 1] = (oldMap[0][WIDTH - 1] + oldMap[0][WIDTH - 2] + oldMap[1][WIDTH - 2] + oldMap[1][WIDTH - 1]+ upperRow[WIDTH - 2] + upperRow[WIDTH - 1]) / 6;
+
+            diff = abs(newMap[0][WIDTH - 1] - oldMap[0][WIDTH - 1]);
+
+            maxDiff = diff > maxDiff ? diff : maxDiff;
+        }
+        else {
+            newMap[0][WIDTH - 1] = oldMap[0][WIDTH - 1];
+        }
     }
 
+    return maxDiff;
+}
+
+float middleMap(const vector<vector<float>> &oldMap, vector<vector<float>> &newMap, const vector<vector<bool>> &heatSource, const int height) {
+    float diff, maxDiff(0);
     for (int i = 1; i < height - 1; i++) {
-        for (int j = 0; j < width; j++) {
-            if (j == 0 && !heatSource[i][j]) {
-                newMap[i][j] = (oldMap[i][j] + oldMap[i - 1][j] + oldMap[i - 1][j + 1] + oldMap[i][j + 1] + oldMap[i + 1][j + 1] + oldMap[i + 1][j]) / 6;
-
+        for (int j = 0; j < WIDTH; j++) {
+            if(!heatSource[i][j]) {
+                if (j == 0) {
+                    newMap[i][j] = (oldMap[i][j] + oldMap[i - 1][j] + oldMap[i - 1][j + 1] + oldMap[i][j + 1] + oldMap[i + 1][j + 1] + oldMap[i + 1][j]) / 6;
+                }
+                else if (j == WIDTH - 1){
+                    newMap[i][j] = (oldMap[i][j] + oldMap[i - 1][j] + oldMap[i - 1][j - 1] + oldMap[i][j - 1] + oldMap[i + 1][j - 1] + oldMap[i + 1][j]) / 6;
+                }
+                else {
+                    newMap[i][j] = (oldMap[i][j] + oldMap[i - 1][j - 1] + oldMap[i - 1][j] + oldMap[i - 1][j + 1] + oldMap[i][j + 1] + oldMap[i + 1][j + 1] + oldMap[i + 1][j] + oldMap[i + 1][j - 1] + oldMap[i][j - 1]) / 9;
+                }
                 diff = abs(newMap[i][j] - oldMap[i][j]);
 
                 maxDiff = diff > maxDiff ? diff : maxDiff;
             }
-            else if (j == width - 1 && !heatSource[i][j]){
-                newMap[i][j] = (oldMap[i][j] + oldMap[i - 1][j] + oldMap[i - 1][j - 1] + oldMap[i][j - 1] + oldMap[i + 1][j - 1] + oldMap[i + 1][j]) / 6;
-
-                diff = abs(newMap[i][j] - oldMap[i][j]);
-
-                maxDiff = diff > maxDiff ? diff : maxDiff;
-            }
-            else if(!heatSource[i][j]) {
-                newMap[i][j] = (oldMap[i][j] + oldMap[i - 1][j - 1] + oldMap[i - 1][j] + oldMap[i - 1][j + 1] + oldMap[i][j + 1] + oldMap[i + 1][j + 1] + oldMap[i + 1][j] + oldMap[i + 1][j - 1] + oldMap[i][j - 1]) / 9;
-
-                diff = abs(newMap[i][j] - oldMap[i][j]);
-
-                maxDiff = diff > maxDiff ? diff : maxDiff;
+            else {
+                newMap[i][j] = oldMap[i][j];
             }
         }
-    }
-
-    if(!heatSource[height - 1][0]) {
-        newMap[height - 1][0] = (oldMap[height - 1][0] + oldMap[height - 2][0] + oldMap[height - 2][1] + oldMap[height - 1][1]) / 4;
-
-        diff = abs(newMap[height - 1][0] - oldMap[height - 1][0]);
-
-        maxDiff = diff > maxDiff ? diff : maxDiff;
-    }
-    for (int j = 1; j < width - 1; j++) {
-        if(!heatSource[height - 1][j]) {
-            newMap[height - 1][j] = (oldMap[height - 1][j] + oldMap[height - 1][j - 1] + oldMap[height - 2][j - 1] + oldMap[height - 2][j] + oldMap[height - 2][j + 1] + oldMap[height - 1][j + 1]) / 6;
-
-            diff = abs(newMap[height - 1][j] - oldMap[height - 1][j]);
-
-            maxDiff = diff > maxDiff ? diff : maxDiff;
-        }
-    }
-
-    if(!heatSource[height - 1][width - 1]) {
-        newMap[height - 1][width - 1] = (oldMap[height - 1][width - 1] + oldMap[height - 1][width - 2] + oldMap[height - 2][width - 2] + oldMap[height - 2][width - 1]) / 4;
-
-        diff = abs(newMap[height - 1][width - 1] - oldMap[height - 1][width - 1]);
-
-        maxDiff = diff > maxDiff ? diff : maxDiff;
     }
     return maxDiff;
 }
 
+float bottomRow(const vector<vector<float>> &oldMap, vector<vector<float>> &newMap, const vector<vector<bool>> &heatSource, int height, const vector<float> &lowerRow = vector<float>()) {
+    float diff, maxDiff(0);
 
-void printHeatImage(const vector<vector<double>> &map) {
-    for (const auto& row : map) {
-        for (auto el : row) {
-            cout << setw(4) << (int)max(min((float)el, 255.0f), 0.0f) << " ";
+    if(lowerRow.empty()) {
+        if(!heatSource[height - 1][0]) {
+            newMap[height - 1][0] = (oldMap[height - 1][0] + oldMap[height - 2][0] + oldMap[height - 2][1] + oldMap[height - 1][1]) / 4;
+
+            diff = abs(newMap[height - 1][0] - oldMap[height - 1][0]);
+
+            maxDiff = diff > maxDiff ? diff : maxDiff;
         }
-        cout << endl;
+        else {
+            newMap[height - 1][0] = oldMap[height - 1][0];
+        }
+        for (int j = 1; j < WIDTH - 1; j++) {
+            if(!heatSource[height - 1][j]) {
+                newMap[height - 1][j] = (oldMap[height - 1][j] + oldMap[height - 1][j - 1] + oldMap[height - 2][j - 1] + oldMap[height - 2][j] + oldMap[height - 2][j + 1] + oldMap[height - 1][j + 1]) / 6;
+
+                diff = abs(newMap[height - 1][j] - oldMap[height - 1][j]);
+
+                maxDiff = diff > maxDiff ? diff : maxDiff;
+            }
+            else {
+                newMap[height - 1][j] = oldMap[height - 1][j];
+            }
+        }
+
+        if(!heatSource[height - 1][WIDTH - 1]) {
+            newMap[height - 1][WIDTH - 1] = (oldMap[height - 1][WIDTH - 1] + oldMap[height - 1][WIDTH - 2] + oldMap[height - 2][WIDTH - 2] + oldMap[height - 2][WIDTH - 1]) / 4;
+
+            diff = abs(newMap[height - 1][WIDTH - 1] - oldMap[height - 1][WIDTH - 1]);
+
+            maxDiff = diff > maxDiff ? diff : maxDiff;
+        }
+        else {
+            newMap[height - 1][WIDTH - 1] = oldMap[height - 1][WIDTH - 1];
+        }
     }
+    else {
+        if(!heatSource[height - 1][0]) {
+            newMap[height - 1][0] = (oldMap[height - 1][0] + oldMap[height - 2][0] + oldMap[height - 2][1] + oldMap[height - 1][1] + lowerRow[0] + lowerRow[1]) / 6;
+
+            diff = abs(newMap[height - 1][0] - oldMap[height - 1][0]);
+
+            maxDiff = diff > maxDiff ? diff : maxDiff;
+        }
+        else {
+            newMap[height - 1][0] = oldMap[height - 1][0];
+        }
+        for (int j = 1; j < WIDTH - 1; j++) {
+            if(!heatSource[height - 1][j]) {
+                newMap[height - 1][j] = (oldMap[height - 1][j] + oldMap[height - 1][j - 1] + oldMap[height - 2][j - 1] + oldMap[height - 2][j] + oldMap[height - 2][j + 1] + oldMap[height - 1][j + 1] + lowerRow[j - 1] + lowerRow[j] + lowerRow[j + 1]) / 9;
+
+                diff = abs(newMap[height - 1][j] - oldMap[height - 1][j]);
+
+                maxDiff = diff > maxDiff ? diff : maxDiff;
+            }
+            else {
+                newMap[height - 1][j] = oldMap[height - 1][j];
+            }
+        }
+
+        if(!heatSource[height - 1][WIDTH - 1]) {
+            newMap[height - 1][WIDTH - 1] = (oldMap[height - 1][WIDTH - 1] + oldMap[height - 1][WIDTH - 2] + oldMap[height - 2][WIDTH - 2] + oldMap[height - 2][WIDTH - 1] + lowerRow[WIDTH - 2] + lowerRow[WIDTH - 1]) / 6;
+
+            diff = abs(newMap[height - 1][WIDTH - 1] - oldMap[height - 1][WIDTH - 1]);
+
+            maxDiff = diff > maxDiff ? diff : maxDiff;
+        }
+        else {
+            newMap[height - 1][WIDTH - 1] = oldMap[height - 1][WIDTH - 1];
+        }
+    }
+
+    return maxDiff;
+}
+
+//test
+
+float middleMap(const vector<vector<float>> &oldMap, vector<vector<float>> &newMap, const vector<vector<bool>> &heatSource, const int height, const int width) {
+    float diff, maxDiff(0);
+    for (int i = 1; i < height - 1; i++) {
+        for (int j = 0; j < width; j++) {
+            if(!heatSource[i][j]) {
+                if (j == 0) {
+                    newMap[i][j] = (oldMap[i][j] + oldMap[i - 1][j] + oldMap[i - 1][j + 1] + oldMap[i][j + 1] + oldMap[i + 1][j + 1] + oldMap[i + 1][j]) / 6;
+                }
+                else if (j == width - 1){
+                    newMap[i][j] = (oldMap[i][j] + oldMap[i - 1][j] + oldMap[i - 1][j - 1] + oldMap[i][j - 1] + oldMap[i + 1][j - 1] + oldMap[i + 1][j]) / 6;
+                }
+                else {
+                    newMap[i][j] = (oldMap[i][j] + oldMap[i - 1][j - 1] + oldMap[i - 1][j] + oldMap[i - 1][j + 1] + oldMap[i][j + 1] + oldMap[i + 1][j + 1] + oldMap[i + 1][j] + oldMap[i + 1][j - 1] + oldMap[i][j - 1]) / 9;
+                }
+                diff = abs(newMap[i][j] - oldMap[i][j]);
+
+                maxDiff = diff > maxDiff ? diff : maxDiff;
+            }
+            else {
+                newMap[i][j] = oldMap[i][j];
+            }
+        }
+    }
+    return maxDiff;
 }
 
 float rootImage(const vector<vector<float>> &oldMap, vector<vector<float>> &newMap, const vector<vector<bool>> &heatSource, const vector<float> &lowerRow, const int heightLimit) {
@@ -169,6 +431,35 @@ float rootImage(const vector<vector<float>> &oldMap, vector<vector<float>> &newM
 
     float diff, maxDiff(0);
 
+    if(height == 1) {
+        if(!heatSource[0][0]) {
+            newMap[0][0] = (oldMap[0][0] + oldMap[0][1] + lowerRow[0] + lowerRow[1]) / 4;
+
+            diff = abs(newMap[0][0] - oldMap[0][0]);
+
+            maxDiff = diff > maxDiff ? diff : maxDiff;
+        }
+
+        for (int j = 1; j < width - 1; j++) {
+            if(!heatSource[0][j]) {
+                newMap[0][j] = (oldMap[0][j] + oldMap[0][j - 1] + oldMap[1][j - 1] + lowerRow[j] + lowerRow[j + 1] + lowerRow[j + 1]) / 6;
+
+                diff = abs(newMap[0][j] - oldMap[0][j]);
+
+                maxDiff = diff > maxDiff ? diff : maxDiff;
+            }
+        }
+
+        if(!heatSource[0][width - 1]) {
+            newMap[0][width - 1] = (oldMap[0][width - 1] + oldMap[0][width - 2] + lowerRow[width - 2] + lowerRow[width - 1]) / 4;
+
+            diff = abs(newMap[0][width - 1] - oldMap[0][width - 1]);
+
+            maxDiff = diff > maxDiff ? diff : maxDiff;
+        }
+        return maxDiff;
+    }
+
     if(!heatSource[0][0]) {
         newMap[0][0] = (oldMap[0][0] + oldMap[0][1] + oldMap[1][0] + oldMap[1][1]) / 4;
 
@@ -195,31 +486,8 @@ float rootImage(const vector<vector<float>> &oldMap, vector<vector<float>> &newM
         maxDiff = diff > maxDiff ? diff : maxDiff;
     }
 
-    for (int i = 1; i < height - 1; i++) {
-        for (int j = 0; j < width; j++) {
-            if (j == 0 && !heatSource[i][j]) {
-                newMap[i][j] = (oldMap[i][j] + oldMap[i - 1][j] + oldMap[i - 1][j + 1] + oldMap[i][j + 1] + oldMap[i + 1][j + 1] + oldMap[i + 1][j]) / 6;
-
-                diff = abs(newMap[i][j] - oldMap[i][j]);
-
-                maxDiff = diff > maxDiff ? diff : maxDiff;
-            }
-            else if (j == width - 1 && !heatSource[i][j]){
-                newMap[i][j] = (oldMap[i][j] + oldMap[i - 1][j] + oldMap[i - 1][j - 1] + oldMap[i][j - 1] + oldMap[i + 1][j - 1] + oldMap[i + 1][j]) / 6;
-
-                diff = abs(newMap[i][j] - oldMap[i][j]);
-
-                maxDiff = diff > maxDiff ? diff : maxDiff;
-            }
-            else if(!heatSource[i][j]) {
-                newMap[i][j] = (oldMap[i][j] + oldMap[i - 1][j - 1] + oldMap[i - 1][j] + oldMap[i - 1][j + 1] + oldMap[i][j + 1] + oldMap[i + 1][j + 1] + oldMap[i + 1][j] + oldMap[i + 1][j - 1] + oldMap[i][j - 1]) / 9;
-
-                diff = abs(newMap[i][j] - oldMap[i][j]);
-
-                maxDiff = diff > maxDiff ? diff : maxDiff;
-            }
-        }
-    }
+    diff = middleMap(oldMap, newMap, heatSource, height, width);
+    maxDiff = diff > maxDiff ? diff : maxDiff;
 
     if(!heatSource[height - 1][0]) {
         newMap[height - 1][0] = (oldMap[height - 1][0] + oldMap[height - 2][0] + oldMap[height - 2][1] + oldMap[height - 1][1] + lowerRow[0] + lowerRow[1]) / 6;
@@ -255,12 +523,53 @@ float lastProcImage(const vector<vector<float>> &oldMap, vector<vector<float>> &
 
     float diff, maxDiff(0);
 
+    if(height == 1) {
+        if(!heatSource[height - 1][0]) {
+            newMap[0][0] = (oldMap[0][0] + upperRow[0] + upperRow[1] + oldMap[0][1]) / 4;
+
+            diff = abs(newMap[0][0] - oldMap[0][0]);
+
+            maxDiff = diff > maxDiff ? diff : maxDiff;
+        }
+        else {
+            newMap[0][0] = oldMap[0][0];
+        }
+        for (int j = 1; j < width - 1; j++) {
+            if(!heatSource[0][j]) {
+                newMap[0][j] = (oldMap[0][j] + oldMap[0][j - 1] + upperRow[j - 1] + upperRow[j] + upperRow[j + 1] + oldMap[0][j + 1]) / 6;
+
+                diff = abs(newMap[0][j] - oldMap[0][j]);
+
+                maxDiff = diff > maxDiff ? diff : maxDiff;
+            }
+            else {
+                newMap[0][j] = oldMap[0][j];
+            }
+        }
+
+        if(!heatSource[0][width - 1]) {
+            newMap[0][width - 1] = (oldMap[0][width - 1] + oldMap[0][width - 2] + upperRow[width - 2] + upperRow[width - 1]) / 4;
+
+            diff = abs(newMap[0][width - 1] - oldMap[0][width - 1]);
+
+            maxDiff = diff > maxDiff ? diff : maxDiff;
+        }
+        else {
+            newMap[0][width - 1] = oldMap[0][width - 1];
+        }
+
+        return maxDiff;
+    }
+
     if(!heatSource[0][0]) {
         newMap[0][0] = (oldMap[0][0] + oldMap[0][1] + oldMap[1][0] + oldMap[1][1] + upperRow[0] + upperRow[1]) / 6;
 
         diff = abs(newMap[0][0] - oldMap[0][0]);
 
         maxDiff = diff > maxDiff ? diff : maxDiff;
+    }
+    else {
+        newMap[0][0] = oldMap[0][0];
     }
 
     for (int j = 1; j < width - 1; j++) {
@@ -271,6 +580,9 @@ float lastProcImage(const vector<vector<float>> &oldMap, vector<vector<float>> &
 
             maxDiff = diff > maxDiff ? diff : maxDiff;
         }
+        else {
+            newMap[0][j] = oldMap[0][j];
+        }
     }
 
     if(!heatSource[0][width - 1]) {
@@ -280,32 +592,12 @@ float lastProcImage(const vector<vector<float>> &oldMap, vector<vector<float>> &
 
         maxDiff = diff > maxDiff ? diff : maxDiff;
     }
-
-    for (int i = 1; i < height - 1; i++) {
-        for (int j = 0; j < width; j++) {
-            if (j == 0 && !heatSource[i][j]) {
-                newMap[i][j] = (oldMap[i][j] + oldMap[i - 1][j] + oldMap[i - 1][j + 1] + oldMap[i][j + 1] + oldMap[i + 1][j + 1] + oldMap[i + 1][j]) / 6;
-
-                diff = abs(newMap[i][j] - oldMap[i][j]);
-
-                maxDiff = diff > maxDiff ? diff : maxDiff;
-            }
-            else if (j == width - 1 && !heatSource[i][j]){
-                newMap[i][j] = (oldMap[i][j] + oldMap[i - 1][j] + oldMap[i - 1][j - 1] + oldMap[i][j - 1] + oldMap[i + 1][j - 1] + oldMap[i + 1][j]) / 6;
-
-                diff = abs(newMap[i][j] - oldMap[i][j]);
-
-                maxDiff = diff > maxDiff ? diff : maxDiff;
-            }
-            else if(!heatSource[i][j]) {
-                newMap[i][j] = (oldMap[i][j] + oldMap[i - 1][j - 1] + oldMap[i - 1][j] + oldMap[i - 1][j + 1] + oldMap[i][j + 1] + oldMap[i + 1][j + 1] + oldMap[i + 1][j] + oldMap[i + 1][j - 1] + oldMap[i][j - 1]) / 9;
-
-                diff = abs(newMap[i][j] - oldMap[i][j]);
-
-                maxDiff = diff > maxDiff ? diff : maxDiff;
-            }
-        }
+    else {
+        newMap[0][width - 1] = oldMap[0][width - 1];
     }
+
+    diff = middleMap(oldMap, newMap, heatSource, height, width);
+    maxDiff = diff > maxDiff ? diff : maxDiff;
 
     if(!heatSource[height - 1][0]) {
         newMap[height - 1][0] = (oldMap[height - 1][0] + oldMap[height - 2][0] + oldMap[height - 2][1] + oldMap[height - 1][1]) / 4;
@@ -314,6 +606,9 @@ float lastProcImage(const vector<vector<float>> &oldMap, vector<vector<float>> &
 
         maxDiff = diff > maxDiff ? diff : maxDiff;
     }
+    else {
+        newMap[height - 1][0] = oldMap[height - 1][0];
+    }
     for (int j = 1; j < width - 1; j++) {
         if(!heatSource[height - 1][j]) {
             newMap[height - 1][j] = (oldMap[height - 1][j] + oldMap[height - 1][j - 1] + oldMap[height - 2][j - 1] + oldMap[height - 2][j] + oldMap[height - 2][j + 1] + oldMap[height - 1][j + 1]) / 6;
@@ -321,6 +616,9 @@ float lastProcImage(const vector<vector<float>> &oldMap, vector<vector<float>> &
             diff = abs(newMap[height - 1][j] - oldMap[height - 1][j]);
 
             maxDiff = diff > maxDiff ? diff : maxDiff;
+        }
+        else {
+            newMap[height - 1][j] = oldMap[height - 1][j];
         }
     }
 
@@ -331,37 +629,248 @@ float lastProcImage(const vector<vector<float>> &oldMap, vector<vector<float>> &
 
         maxDiff = diff > maxDiff ? diff : maxDiff;
     }
-    return maxDiff;
-
+    else {
+        newMap[height - 1][width - 1] = oldMap[height - 1][width - 1];
+    }
     return maxDiff;
 }
 
-int main(int argc, char **argv) {
+float middleProcImage(const vector<vector<float>> &oldMap, vector<vector<float>> &newMap, const vector<vector<bool>> &heatSource, const vector<float> &upperRow, const vector<float> &lowerRow) {
+    const int height(oldMap.size());
+    const int width(oldMap[0].size());
 
-//    for(int i = 0; i < argc; i++) {
-//        cout << "Arg" << i << argv[i] << endl;
+    float diff, maxDiff(0);
+
+    if(height == 1) {
+        for (int j = 0; j < width; j++) {
+            if(!heatSource[0][j]) {
+                if (j == 0) {
+                    newMap[0][j] = (oldMap[0][j] + upperRow[j] + upperRow[j + 1] + oldMap[0][j + 1] + lowerRow[j + 1] + lowerRow[j]) / 6;
+                }
+                else if (j == width - 1){
+                    newMap[0][j] = (oldMap[0][j] + upperRow[j] + upperRow[j - 1] + oldMap[0][j - 1] + lowerRow[j - 1] + lowerRow[j]) / 6;
+                }
+                else {
+                    newMap[0][j] = (oldMap[0][j] + upperRow[j - 1] +upperRow[j] + upperRow[j + 1] + oldMap[0][j + 1] + lowerRow[j + 1] + lowerRow[j] + lowerRow[j - 1] + oldMap[0][j - 1]) / 9;
+                }
+                diff = abs(newMap[0][j] - oldMap[0][j]);
+
+                maxDiff = diff > maxDiff ? diff : maxDiff;
+            }
+            else {
+                newMap[0][j] = oldMap[0][j];
+            }
+        }
+        return maxDiff;
+    }
+
+    if(!heatSource[0][0]) {
+        newMap[0][0] = (oldMap[0][0] + oldMap[0][1] + oldMap[1][0] + oldMap[1][1] + upperRow[0] + upperRow[1]) / 6;
+
+        diff = abs(newMap[0][0] - oldMap[0][0]);
+
+        maxDiff = diff > maxDiff ? diff : maxDiff;
+    }
+    else {
+        newMap[0][0] = oldMap[0][0];
+    }
+
+    for (int j = 1; j < width - 1; j++) {
+        if(!heatSource[0][j]) {
+            newMap[0][j] = (oldMap[0][j] + oldMap[0][j - 1] + oldMap[1][j - 1] + oldMap[1][j] + oldMap[1][j + 1] + oldMap[0][j + 1]+ upperRow[j - 1] + upperRow[j] + upperRow[j + 1]) / 9;
+
+            diff = abs(newMap[0][j] - oldMap[0][j]);
+
+            maxDiff = diff > maxDiff ? diff : maxDiff;
+        }
+        else {
+            newMap[0][j] = oldMap[0][j];
+        }
+    }
+
+    if(!heatSource[0][width - 1]) {
+        newMap[0][width - 1] = (oldMap[0][width - 1] + oldMap[0][width - 2] + oldMap[1][width - 2] + oldMap[1][width - 1]+ upperRow[width - 2] + upperRow[width - 1]) / 6;
+
+        diff = abs(newMap[0][width - 1] - oldMap[0][width - 1]);
+
+        maxDiff = diff > maxDiff ? diff : maxDiff;
+    }
+    else {
+        newMap[0][width - 1] = oldMap[0][width - 1];
+    }
+
+    diff = middleMap(oldMap, newMap, heatSource, height, width);
+    maxDiff = diff > maxDiff ? diff : maxDiff;
+
+    if(!heatSource[height - 1][0]) {
+        newMap[height - 1][0] = (oldMap[height - 1][0] + oldMap[height - 2][0] + oldMap[height - 2][1] + oldMap[height - 1][1] + lowerRow[0] + lowerRow[1]) / 6;
+
+        diff = abs(newMap[height - 1][0] - oldMap[height - 1][0]);
+
+        maxDiff = diff > maxDiff ? diff : maxDiff;
+    }
+    else {
+        newMap[height - 1][0] = oldMap[height - 1][0];
+    }
+    for (int j = 1; j < width - 1; j++) {
+        if(!heatSource[height - 1][j]) {
+            newMap[height - 1][j] = (oldMap[height - 1][j] + oldMap[height - 1][j - 1] + oldMap[height - 2][j - 1] + oldMap[height - 2][j] + oldMap[height - 2][j + 1] + oldMap[height - 1][j + 1] + lowerRow[j - 1] + lowerRow[j] + lowerRow[j + 1]) / 9;
+
+            diff = abs(newMap[height - 1][j] - oldMap[height - 1][j]);
+
+            maxDiff = diff > maxDiff ? diff : maxDiff;
+        }
+        else {
+            newMap[height - 1][j] = oldMap[height - 1][j];
+        }
+    }
+
+    if(!heatSource[height - 1][width - 1]) {
+        newMap[height - 1][width - 1] = (oldMap[height - 1][width - 1] + oldMap[height - 1][width - 2] + oldMap[height - 2][width - 2] + oldMap[height - 2][width - 1] + lowerRow[width - 2] + lowerRow[width - 1]) / 6;
+
+        diff = abs(newMap[height - 1][width - 1] - oldMap[height - 1][width - 1]);
+
+        maxDiff = diff > maxDiff ? diff : maxDiff;
+    }
+    else {
+        newMap[height - 1][width - 1] = oldMap[height - 1][width - 1];
+    }
+    return maxDiff;
+}
+
+void n2complexity(int x, int y) {
+    for(int i = 0; i < x; i++) {
+        for(int j = 0; j < y; j++) {
+            (i + j);
+        }
+    }
+}
+
+//iterations
+
+bool rootIteration(const vector<vector<float>> &map, vector<vector<float>> &newMap, const vector<vector<bool>> &heatSource, vector<float> &temp) {
+    //send your neighbor lower info
+    sendRow(true, map[ROOT_HEIGHT - 1]);
+
+    //get info from lower process
+    vector<float> lowerTemp(WIDTH, 0);
+    recieveRow(true, lowerTemp);
+
+    //computation
+//    float diff (-RANK);
+//    if(ROOT_HEIGHT > 1) {
+//        float difft(topRow(map, newMap, heatSource));
+//        float diffm(middleMap(map, newMap, heatSource, PROCESS_HEIGHT));
+//        float diffb(bottomRow(map, newMap, heatSource, PROCESS_HEIGHT, lowerTemp));
+//
+//        diff = min_of_3(difft, diffm, diffb);
 //    }
-//    cout << endl;
+//    else {
+//        //todo: one row special case
+//    }
 
+    float diff(rootImage(map, newMap, heatSource, lowerTemp, ROOT_HEIGHT));
+
+    //iteration differences
+    vector<float> differences(WORLD_SIZE, 0);
+    MPI_Gather(nullptr, 0, MPI_FLOAT, differences.data(), 1, MPI_FLOAT, ROOT, MPI_COMM_WORLD);
+
+    differences[0] = diff;
+    float maxDiff(differences[0]);
+
+    for(int i = 0; i < WORLD_SIZE; i++) {
+        if(differences[i] > maxDiff)
+            maxDiff = differences[i];
+        //cout << "P:" << i << " diff: " << differences[i] << endl;
+    }
+
+    vector<int> signal(1, false);
+    if(maxDiff < EPS_DIFF) {
+        cout << ITERATION << " " << maxDiff << endl;
+        signal[0] = true;
+        MPI_Bcast(signal.data(),1, MPI_INT,ROOT,MPI_COMM_WORLD);
+
+        prepareResult(map, temp);
+
+        return true;
+    }
+
+    signal[0] = false;
+    MPI_Bcast(signal.data(),1, MPI_INT,ROOT,MPI_COMM_WORLD);
+    return false;
+}
+
+bool subProcIteration(const vector<vector<float>> &map, vector<vector<float>> &newMap, const vector<vector<bool>> &heatSource, bool last = false) {
+    //send info to neighbour above and bellow
+    sendRow(false, map[0]);
+    if(!last)
+        sendRow(true, map[PROCESS_HEIGHT - 1]);
+
+    //recieve info from neighbors
+    vector<float> upperTemp(WIDTH, 0);
+    recieveRow(false, upperTemp);
+
+    vector<float> lowerTemp(0, 0);
+    if(!last) {
+        lowerTemp.resize(WIDTH, 0);
+        recieveRow(true, lowerTemp);
+    }
+
+    // computation
+    float diff (-RANK);
+//    if(PROCESS_HEIGHT > 1) {
+//        float difft(topRow(map, newMap, heatSource, upperTemp));
+//        float diffm(middleMap(map, newMap, heatSource, PROCESS_HEIGHT));
+//        float diffb(bottomRow(map, newMap, heatSource, PROCESS_HEIGHT, lowerTemp));
+//
+//        diff = min_of_3(difft, diffm, diffb);
+//    }
+//    else {
+//        //todo: one row special case
+//    }
+
+    if(last)
+        diff = lastProcImage(map, newMap, heatSource, upperTemp);
+    else
+        diff = middleProcImage(map, newMap, heatSource, upperTemp, lowerTemp);
+
+    //send max diff
+    vector<float> messageDiff {diff};
+    MPI_Gather(messageDiff.data(), 1, MPI_FLOAT, nullptr, 0, MPI_FLOAT, ROOT, MPI_COMM_WORLD);
+
+    //stopping signal
+    vector<int> ibuffer (1, 0);
+    MPI_Bcast(ibuffer.data(),1, MPI_INT,ROOT,MPI_COMM_WORLD);
+    if(ibuffer[0] == 1) {
+        returnFinalMap(map);
+        return true;
+    }
+    return false;
+}
+
+
+
+int main(int argc, char **argv) {
     // Initialize MPI
     MPI_Init(&argc, &argv);
     int worldSize, myRank;
     MPI_Comm_size(MPI_COMM_WORLD, &worldSize);
     MPI_Comm_rank(MPI_COMM_WORLD, &myRank);
 
-//    if (argc == 1) {
-//        if (myRank == 0) {
-//            printHelpPage(argv[0]);
-//        }
-//        MPI_Finalize();
-//        exit(0);
-//    } else if (argc != 3) {
-//        if (myRank == 0) {
-//            printHelpPage(argv[0]);
-//        }
-//        MPI_Finalize();
-//        exit(1);
-//    }
+    if (argc == 1) {
+        if (myRank == 0) {
+            printHelpPage(argv[0]);
+        }
+        MPI_Finalize();
+        exit(0);
+    }
+    else if (argc != 3) {
+        if (myRank == 0) {
+            printHelpPage(argv[0]);
+        }
+        MPI_Finalize();
+        exit(1);
+    }
 
     // Read the input instance.
     int width, height;  // Width and height of the matrix.
@@ -378,374 +887,48 @@ int main(int argc, char **argv) {
     //        |  |  |        \\
     //        V  V  V        \\
 
-    constexpr double DEFAULT_TEMP = 0;
-    constexpr double EPS_DIFF = 1e6;
-    constexpr int BUFFER_SIZE = 256;
-    constexpr int ROOT = 0;
-    vector<float> temp;
-
+    if(worldSize == 1) {
+        MPI_Finalize();
+        exit(0);
+    }
     vector<vector<float>> map, newMap;
     vector<vector<bool>> heatSource;
-    bool resize(false);
+    vector<float> temp;
 
-    int  processHeight, processWidth;
+    RANK = myRank;
+    WORLD_SIZE = worldSize;
 
-    int it = 0;
-    while (it < 10) {
-        if(myRank == ROOT) {//root process
-            it++;
-            processHeight = height / worldSize;
-            processWidth = width;
-            const int rootHeight(processHeight + height % worldSize);
+    //initialization of processes
+    if(RANK == ROOT) {
+        PROCESS_HEIGHT = height / WORLD_SIZE;
+        ROOT_HEIGHT = PROCESS_HEIGHT + height % worldSize;
+        WIDTH = width;
+        HEIGHT = height;
 
-            if(!resize) {
-                map.resize(height, vector<float>(width, DEFAULT_TEMP));
-                newMap.resize(height, vector<float>(width, DEFAULT_TEMP));
-                heatSource.resize(height, vector<bool>(width, false));
-                resize = true;
-
-                for (auto & spot : spots) {
-                    map[spot.mX][spot.mY] = spot.mTemperature;
-                    newMap[spot.mX][spot.mY] = spot.mTemperature;
-                    heatSource[spot.mX][spot.mY] = true;
-                }
-
-                //bcast problem sizes to each process
-                int dimensions[2] = {processHeight, width};
-                MPI_Bcast(dimensions,2, MPI_INT,ROOT,MPI_COMM_WORLD);
-
-                //prepare matrices for each process
-                //cout << "ph: " << processHeight << endl;
-                for(int proc = 1; proc < worldSize; proc++) {
-                    float *mapMessage (new float [width * processHeight]);
-                    int *sourceMessage (new int [width * processHeight]);
-                    int k = 0;
-                    for(int i = rootHeight + (proc - 1) * processHeight; i < rootHeight + proc * processHeight; i++) {
-                        for(int j = 0; j < width; j++) {
-                            mapMessage[k] = map[i][j];
-                            sourceMessage[k] = heatSource[i][j];
-                            k++;
-                        }
-                    }
-                    MPI_Send(mapMessage,width * processHeight, MPI_FLOAT,proc,0,MPI_COMM_WORLD);
-                    MPI_Send(sourceMessage,width * processHeight, MPI_INT,proc,0,MPI_COMM_WORLD);
-                    delete[] mapMessage;
-                    delete[] sourceMessage;
-                }
-            }
-
-            //one iteration
-
-            //send your neighbor lower info
-            float *rowMessage (new float [width]);
-            int row(rootHeight - 1);
-
-            for(int j = 0; j < width; j++) {
-                rowMessage[j] = map[row][j];
-            }
-
-            MPI_Send(rowMessage,width, MPI_FLOAT,myRank + 1,0,MPI_COMM_WORLD);
-            delete[] rowMessage;
+        rootInit(map, newMap, heatSource, spots);
+    }
+    else
+        subProcesInit(map, newMap, heatSource);
 
 
-            //get info from lower process
-            MPI_Status status;
-            float fbuffer[BUFFER_SIZE];
-            MPI_Recv(fbuffer,BUFFER_SIZE, MPI_FLOAT,myRank + 1,MPI_ANY_TAG,MPI_COMM_WORLD,&status);
-
-            //cout << "P:" << myRank << " " << "Lower: ";
-            vector<float> lowerTemp(processWidth, 0);
-            for(int i = 0; i < processWidth; i++) {
-                //cout << fbuffer[i] << " ";
-                lowerTemp[i] = fbuffer[i];
-            }
-
-            //computation
-            //float diff = myRank;
-            float diff(rootImage(map, newMap, heatSource, lowerTemp, rootHeight));
-            swap(map, newMap);
-
-            // check differences
-
-            //cout << endl;
-
-            float *differences(new float [worldSize]());
-            MPI_Gather(nullptr, 0, MPI_FLOAT, differences, 1, MPI_FLOAT, ROOT, MPI_COMM_WORLD);
-
-            differences[0] = diff;
-            float maxDiff(differences[0]);
-            for(int i = 0; i < worldSize; i++) {
-                if(differences[i] > maxDiff)
-                    maxDiff = differences[i];
-                //cout << "P:" << myRank << " diff: " << differences[i] << endl;
-            }
-            delete[] differences;
-
-            //send stopping info to processes
-            int signal[1];
-            if(maxDiff < EPS_DIFF) {
-                //end iterations
-                signal[0] = 1;
-                MPI_Bcast(signal,1, MPI_INT,ROOT,MPI_COMM_WORLD);
-
-                //gather results
-                temp.resize(width * height);
-
-                float *tbuffer(new float [worldSize * processWidth * processHeight]());
-                MPI_Gather(nullptr, 0, MPI_FLOAT, tbuffer, processWidth * processHeight, MPI_FLOAT, ROOT, MPI_COMM_WORLD);
-
-                int k = 0;
-                for(int i = 0; i < rootHeight; i++) {
-                    for(float el: map[i]) {
-                        temp[k] = el;
-                        k++;
-                    }
-                }
-
-                const int delta(rootHeight - processHeight);
-                //cout << endl;
-
-                for(int proc = 1; proc < worldSize; proc++) {
-                    const int begin(proc * processWidth * processHeight);
-                    const int end((proc + 1) * processWidth * processHeight);
-                    //cout << "Proc:" << proc << " ";
-                    for(int i = begin; i < end; i++) {
-                        //if(i % processWidth == 0) cout << " | ";
-                        //cout << tbuffer[i] << " ";
-                        temp[i + delta * processWidth] = tbuffer[i];
-                    }
-                    //cout << endl;
-                }
-                //cout << endl;
-
-                for(int i = 0; i < temp.size(); i++) {
-                    if(i % processWidth == 0) cout << " | ";
-                    cout << temp[i] << " ";
-                }
-                break;
-            }
-            else {
-                signal[0] = 0;
-                MPI_Bcast(signal,1, MPI_INT,ROOT,MPI_COMM_WORLD);
-            }
+    int it (0);
+    bool stopFlag (false);
+    while (!stopFlag) {
+        it++;
+        ITERATION = it;
+        if(RANK == ROOT) {
+            stopFlag = rootIteration(map, newMap, heatSource, temp);
         }
-        else if(myRank == worldSize - 1) {//last process rowise
-            it++;
-            //get process dimensions form root
-            int ibuffer[BUFFER_SIZE];
-            float fbuffer[BUFFER_SIZE];
-            int receivedSize;
-            MPI_Status status;
-
-            if(!resize) {
-                MPI_Bcast(ibuffer,2, MPI_INT,ROOT,MPI_COMM_WORLD);
-
-                processHeight = ibuffer[0];
-                processWidth = ibuffer[1];
-
-                map.resize(processHeight, vector<float>(processWidth, DEFAULT_TEMP));
-                newMap.resize(processHeight, vector<float>(processWidth, DEFAULT_TEMP));
-                heatSource.resize(processHeight, vector<bool>(processWidth, false));
-                resize = true;
-
-                //get process matrix
-
-
-                MPI_Recv(fbuffer,BUFFER_SIZE, MPI_FLOAT,ROOT,MPI_ANY_TAG,MPI_COMM_WORLD,&status);
-
-                MPI_Get_count(&status, MPI_FLOAT, &receivedSize);
-
-                MPI_Recv(ibuffer,BUFFER_SIZE, MPI_INT,ROOT,MPI_ANY_TAG,MPI_COMM_WORLD, &status);
-
-                if(receivedSize != processWidth * processHeight)
-                    throw std::logic_error("receivedSize != processWidth * processHeight");
-
-                //cout << "P:" << myRank << " " << "Mat: ";
-                int k = 0;
-                for(int i = 0; i < processHeight; i++) {
-                    for(int j = 0; j < processWidth; j++) {
-                        //cout << fbuffer[k] << " ";
-                        map[i][j] = fbuffer[k];
-                        heatSource[i][j] = ibuffer[k];
-                        k++;
-                    }
-                    //cout << " | ";
-                }
-            }
-
-            //one iteration
-
-            //send info to neighbour above
-
-            float *rowMessage (new float [processWidth]);
-            //cout << "P:" << myRank << " " << "Row: ";
-            for(int j = 0; j < processWidth; j++) {
-                //cout << map[0][j] << " ";
-                rowMessage[j] = map[0][j];
-            }
-
-            MPI_Send(rowMessage,processWidth, MPI_FLOAT,myRank - 1,0,MPI_COMM_WORLD);
-            delete[] rowMessage;
-
-            //get info from neighbour above
-            MPI_Recv(fbuffer,BUFFER_SIZE, MPI_FLOAT,myRank - 1,MPI_ANY_TAG,MPI_COMM_WORLD,&status);
-            MPI_Get_count(&status, MPI_FLOAT, &receivedSize);
-
-            if(receivedSize != processWidth)
-                throw std::logic_error("receivedSize != processWidth " + to_string(myRank));
-
-            vector<float> upperTemp(processWidth, 0);
-
-            //cout << "P:" << myRank << " " << "Upper: ";
-            for(int i = 0; i < processWidth; i++) {
-                //cout << fbuffer[i] << " ";
-                upperTemp[i] = fbuffer[i];
-            }
-
-
-            //todo: computation
-            float diff (lastProcImage(map, newMap, heatSource, upperTemp));
-            swap(map, newMap);
-
-            //send max diff
-            //float diff = myRank;
-            float messageDiff[1] = {diff};
-            MPI_Gather(messageDiff, 1, MPI_FLOAT, nullptr, 0, MPI_FLOAT, ROOT, MPI_COMM_WORLD);
-
-            //stopping signal
-            MPI_Bcast(ibuffer,1, MPI_INT,ROOT,MPI_COMM_WORLD);
-            if(ibuffer[0] == 1) {
-                float *mapMessage(new float [processWidth * processHeight]);
-                int k = 0;
-                //cout << "P" << myRank << ": ";
-                for(int i = 0; i < processHeight; i++) {
-                    for(int j = 0; j < processWidth; j++) {
-                        //cout << map[i][j] << " ";
-                        mapMessage[k] = map[i][j];
-                        k++;
-                    }
-                    //cout << " | ";
-                }
-                //cout << endl << "Size " << processWidth * processHeight << endl;
-                MPI_Gather(mapMessage, processWidth * processHeight, MPI_FLOAT, nullptr, 0, MPI_FLOAT, ROOT, MPI_COMM_WORLD);
-
-                delete[] mapMessage;
-                break;
-            }
+        else if(RANK == WORLD_SIZE - 1) {
+            stopFlag = subProcIteration(map, newMap, heatSource, true);
         }
         else {
-            it++;
-            //get process dimensions form root
-            int ibuffer[BUFFER_SIZE];
-            float fbuffer[BUFFER_SIZE];
-            int receivedSize;
-            MPI_Status status;
-
-            if(!resize) {
-                MPI_Bcast(ibuffer,2, MPI_INT,ROOT,MPI_COMM_WORLD);
-
-                processHeight = ibuffer[0];
-                processWidth = ibuffer[1];
-
-                map.resize(processHeight, vector<float>(processWidth, DEFAULT_TEMP));
-                newMap.resize(processHeight, vector<float>(processWidth, DEFAULT_TEMP));
-                heatSource.resize(processHeight, vector<bool>(processWidth, false));
-                resize = true;
-
-                //get process matrix
-
-                MPI_Recv(fbuffer,BUFFER_SIZE, MPI_FLOAT,ROOT,MPI_ANY_TAG,MPI_COMM_WORLD,&status);
-
-                MPI_Get_count(&status, MPI_FLOAT, &receivedSize);
-
-                MPI_Recv(ibuffer,BUFFER_SIZE, MPI_INT,ROOT,MPI_ANY_TAG,MPI_COMM_WORLD, &status);
-
-                if(receivedSize != processWidth * processHeight)
-                    throw std::logic_error("receivedSize != processWidth * processHeight");
-
-                int k = 0;
-                //cout << "P:" << myRank << " " << "Mat: ";
-                for(int i = 0; i < processHeight; i++) {
-                    for(int j = 0; j < processWidth; j++) {
-                        //cout << fbuffer[k] << " ";
-                        map[i][j] = fbuffer[k];
-                        heatSource[i][j] = ibuffer[k];
-                        k++;
-                    }
-                    //cout << " | ";
-                }
-            }
-
-            //one iteration
-
-            //send info to neighbour above and bellow
-
-            float *rowMessageUp (new float [processWidth]), *rowMessageDown (new float [processWidth]);
-
-            for(int j = 0; j < processWidth; j++) {
-                rowMessageUp[j] = map[0][j];
-                rowMessageDown[j] = map[processHeight - 1][j];
-            }
-
-            MPI_Send(rowMessageUp,processWidth, MPI_FLOAT,myRank - 1,0,MPI_COMM_WORLD);
-            MPI_Send(rowMessageDown,processWidth, MPI_FLOAT,myRank + 1,0,MPI_COMM_WORLD);
-
-            delete[] rowMessageUp;
-            delete[] rowMessageDown;
-
-            //recieve info from neighbors
-            MPI_Recv(fbuffer,BUFFER_SIZE, MPI_FLOAT,myRank - 1,MPI_ANY_TAG,MPI_COMM_WORLD,&status);
-
-            vector<float> upperTemp(processWidth, 0);
-            //cout << "P:" << myRank << " " << "Upper: ";
-            for(int i = 0; i < processWidth; i++) {
-                //cout << fbuffer[i] << " ";
-                upperTemp[i] = fbuffer[i];
-            }
-            cout << endl;
-
-            MPI_Recv(fbuffer,BUFFER_SIZE, MPI_FLOAT,myRank + 1,MPI_ANY_TAG,MPI_COMM_WORLD,&status);
-
-            //cout << "P:" << myRank << " " << "Lower: ";
-            vector<float> lowerTemp(processWidth, 0);
-            for(int i = 0; i < processWidth; i++) {
-                //cout << fbuffer[i] << " ";
-                upperTemp[i] = fbuffer[i];
-            }
-
-            //todo: computation
-
-            //send max diff to root
-            float diff = myRank;
-            float messageDiff[1] = {diff};
-            MPI_Gather(messageDiff, 1, MPI_FLOAT, nullptr, 0, MPI_FLOAT, ROOT, MPI_COMM_WORLD);
-
-            //stopping signal
-            MPI_Bcast(ibuffer,1, MPI_INT,ROOT,MPI_COMM_WORLD);
-            if(ibuffer[0] == 1) {
-                float *mapMessage(new float [processWidth * processHeight]);
-                int k = 0;
-                //cout << "P" << myRank << ": ";
-                for(int i = 0; i < processHeight; i++) {
-                    for(int j = 0; j < processWidth; j++) {
-                        //cout << map[i][j] << " ";
-                        mapMessage[k] = map[i][j];
-                        k++;
-                    }
-                    //cout << " | ";
-                }
-                //cout << endl << "Size " << processWidth * processHeight << endl;
-                MPI_Gather(mapMessage, processWidth * processHeight, MPI_FLOAT, nullptr, 0, MPI_FLOAT, ROOT, MPI_COMM_WORLD);
-
-                delete[] mapMessage;
-                break;
-            }
-
+            stopFlag = subProcIteration(map, newMap, heatSource);
         }
+        std::swap(map, newMap);
     }
 
-
-    // TODO: Fill this array on processor with rank 0. It must have height * width elements and it contains the
+    // Fill this array on processor with rank 0. It must have height * width elements, and it contains the
     // linearized matrix of temperatures in row-major order
     // (see https://en.wikipedia.org/wiki/Row-_and_column-major_order)
     vector<float> temperatures = std::move(temp);
@@ -753,19 +936,17 @@ int main(int argc, char **argv) {
     //-----------------------\\
 
     double totalDuration = duration_cast<duration<double>>(high_resolution_clock::now() - start).count();
-//    cout << " computational time: " << totalDuration << " s" << endl;
+    cout << "computational time: " << totalDuration << " s" << endl;
 
     if (myRank == 0) {
         string outputFileName(argv[2]);
         writeOutput(myRank, width, height, outputFileName, temperatures);
-        //     cout << "Finalize p:" << myRank << endl;
-        MPI_Finalize();
-
-    }
-    else {
-        //   cout << "Finalize p:" << myRank << endl;
-        MPI_Finalize();
+        //for(auto el: temperatures) { cout << el << " "; }
     }
 
+    MPI_Finalize();
     return 0;
 }
+
+
+#pragma clang diagnostic pop
